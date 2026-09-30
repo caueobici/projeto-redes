@@ -1,4 +1,4 @@
-"""Cliente do Monitor do Sistema (Projeto Prático 1 - Fase 1).
+"""Cliente do Monitor do Sistema (Projeto Prático 1 - Fase 2).
 
 Fluxo: socket -> connect, depois duas threads:
   - Thread 1: lê comandos do teclado e envia ao servidor.
@@ -11,8 +11,8 @@ import socket
 import sys
 import threading
 
-HOST_PADRAO = "127.0.0.1"
-PORTA_PADRAO = 5000
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 5000
 
 
 def thread_teclado(sock, desconectado, saindo):
@@ -38,29 +38,30 @@ def thread_tela(sock, desconectado, saindo):
         dados = sock.recv(4096)
         if not dados:
             break
-        print(dados.decode("utf-8", errors="replace"), end="", flush=True)
+        print(dados.decode("utf-8"), end="", flush=True)
     desconectado.set()
     if not saindo.is_set():
-        print("Conexao encerrada pelo servidor. Pressione ENTER para sair.")
+        print("Conexao encerrada pelo servidor.")
 
 
 def main():
-    host = sys.argv[1] if len(sys.argv) > 1 else HOST_PADRAO
-    porta = int(sys.argv[2]) if len(sys.argv) > 2 else PORTA_PADRAO
+    host = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_HOST
+    porta = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_PORT
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((host, porta))
 
     desconectado = threading.Event()  # servidor fechou a conexão
     saindo = threading.Event()        # usuário digitou EXIT
-    t1 = threading.Thread(target=thread_teclado, args=(sock, desconectado, saindo), name="thread-1-teclado")
+    t1 = threading.Thread(target=thread_teclado, args=(sock, desconectado, saindo),
+                          name="thread-1-teclado", daemon=True)
     t2 = threading.Thread(target=thread_tela, args=(sock, desconectado, saindo), name="thread-2-tela")
     t1.start()
     t2.start()
 
-    # Todas as threads terminaram? -> Fim
-    t1.join()
     t2.join()
+    if saindo.is_set():
+        t1.join()
     sock.close()
 
 

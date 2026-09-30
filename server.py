@@ -1,13 +1,3 @@
-"""Servidor do Monitor do Sistema (Projeto Prático 1 - Fase 1).
-
-Atende um único cliente. Fluxo: socket -> bind -> listen -> accept -> MSG1,
-depois duas threads por conexão:
-  - Thread 1: lê comandos do socket e cria/encerra threads de monitor.
-  - Thread 2: envia ao cliente as saídas que os monitores colocam na fila.
-
-Uso: python3 server.py [host] [porta]
-"""
-
 import queue
 import re
 import socket
@@ -16,8 +6,9 @@ import sys
 import threading
 from datetime import datetime
 
-HOST_PADRAO = "0.0.0.0"
-PORTA_PADRAO = 5000
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 5000
+DEFAULT_MAX_CLIENTS = 5
 
 MENU = """\
 =================== MONITOR DO SISTEMA ===================
@@ -34,8 +25,12 @@ Exemplo: CPU-5
 =========================================================="""
 
 
-def agora():
+def now():
     return datetime.now().strftime("%H:%M:%S")
+
+
+def log(msg):
+    print("[%s] %s\n" % (now(), msg), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +111,9 @@ def ler_memoria():
 # ---------------------------------------------------------------------------
 
 class Session:
-    def __init__(self, conn):
+    def __init__(self, conn, endereco):
         self.conn = conn
+        self.endereco = "%s:%d" % endereco
         self.saida = queue.Queue()
         self.encerrar = threading.Event()
         self.monitores = {}
@@ -160,7 +156,7 @@ class Session:
             except Exception as e:
                 valor = "erro ao ler metrica (%s)" % e
             if not parar.is_set():
-                self.enviar("[%s] #%d %s: %s" % (agora(), mid, tipo, valor))
+                self.enviar("[%s] #%d %s: %s" % (now(), mid, tipo, valor))
 
     def parar_monitor(self, mid):
         with self.lock:
@@ -195,7 +191,7 @@ class Session:
         cmd = linha.strip().upper().replace("Ó", "O")
         if not cmd:
             return
-        print("[%s] comando recebido: %s" % (agora(), linha.strip()))
+        log("%s comando recebido: %s" % (self.endereco, linha.strip()))
 
         m = re.fullmatch(r"(CPU|MEM|MEMORIA)(?:-(\d+))?", cmd)
         if m:
@@ -229,9 +225,11 @@ class Session:
     def thread_leitura(self):
         buffer = ""
         while not self.encerrar.is_set():
-            dados = self.conn.recv(1024)
+            try:
+                dados = self.conn.recv(1024)
+            except:
+                dados = b""
             if not dados:  # cliente fechou a conexão
-                print("[%s] cliente desconectou." % agora())
                 self.parar_todos()
                 self.encerrar.set()
                 break
@@ -248,7 +246,12 @@ class Session:
                 texto = self.saida.get(timeout=0.5)
             except queue.Empty:
                 continue
-            self.conn.sendall((texto + "\n").encode("utf-8"))
+            try:
+                self.conn.sendall((texto + "\n").encode("utf-8"))
+            except:  # encerra sessao se conexão for perdida
+                self.parar_todos()
+                self.encerrar.set()
+                break
         # Fecha a conexão: o cliente recebe EOF e encerra sua thread 2.
         try:
             self.conn.shutdown(socket.SHUT_RDWR)
@@ -256,34 +259,87 @@ class Session:
             pass  # o cliente ja tinha fechado
 
 
+lock_clientes = threading.Lock()
+ativos = 0     # clientes conectados no momento
+clientes = []  # handles das threads de trabalho: (endereco, Thread)
+
+
+def handle(conn, endereco, max_clientes):
+    global ativos
+    nome = "%s:%d" % endereco
+
+    with lock_clientes:
+        aceito = ativos < max_clientes
+        if aceito:
+            ativos += 1
+            log("%s conectado (ativos: %d/%d)" % (nome, ativos, max_clientes))
+
+    if not aceito:
+        log("%s recusado: limite de %d clientes atingido" % (nome, max_clientes))
+        conn.sendall(("%s: SERVIDOR CHEIO (limite de %d clientes). Tente novamente mais tarde.\n"
+                      % (now(), max_clientes)).encode("utf-8"))
+        conn.shutdown(socket.SHUT_RDWR)
+        conn.close()
+        return
+
+    try:
+        sessao = Session(conn, endereco)
+        sessao.enviar("%s: CONECTADO!!" % now()) 
+        sessao.enviar(MENU)
+
+        t1 = threading.Thread(target=sessao.thread_leitura, name="%s-leitura" % nome)
+        t2 = threading.Thread(target=sessao.thread_envio, name="%s-envio" % nome)
+        t1.start()
+        t2.start()
+
+        # libera o cliente caso ele feche a conexão ou digite EXIT
+        t1.join()
+        t2.join()
+        conn.close()
+    finally:
+        with lock_clientes:
+            ativos -= 1
+            log("%s saiu (ativos: %d/%d)" % (nome, ativos, max_clientes))
+
+
+def usage():
+    print("python3 server.py [max_clientes] [host] [porta]  (max_clientes padrao: %d)"
+          % DEFAULT_MAX_CLIENTS)
+    sys.exit(2)
+
+
 def main():
-    host = sys.argv[1] if len(sys.argv) > 1 else HOST_PADRAO
-    porta = int(sys.argv[2]) if len(sys.argv) > 2 else PORTA_PADRAO
+    try:
+        max_clientes = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_MAX_CLIENTS
+        host = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_HOST
+        porta = int(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_PORT
+    except ValueError:
+        usage()
+    if max_clientes < 1:
+        usage()
 
     servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     servidor.bind((host, porta))
-    servidor.listen(1)
-    print("[%s] servidor aguardando conexao em %s:%d ..." % (agora(), host, porta))
+    servidor.listen(5)
+    log("servidor aguardando conexoes em %s:%d (max %d clientes) ..." % (host, porta, max_clientes))
 
-    conn, address = servidor.accept()
-    servidor.close()  # apenas um usuário remoto
-    print("[%s] cliente conectado: %s:%d" % (agora(), *address))
-
-    sessao = Session(conn)
-    sessao.enviar("%s: CONECTADO!!" % agora())  # CONECTADO!
-    sessao.enviar(MENU)
-
-    t1 = threading.Thread(target=sessao.thread_leitura, name="thread-1-leitura")
-    t2 = threading.Thread(target=sessao.thread_envio, name="thread-2-envio")
-    t1.start()
-    t2.start()
-
-    # encerra se todas as threads terminarem
-    t1.join()
-    t2.join()
-    conn.close()
-    print("[%s] servidor encerrado." % agora())
+    try:
+        while True:
+            conn, endereco = servidor.accept()
+            t = threading.Thread(target=handle, args=(conn, endereco, max_clientes),
+                                 name="trabalho-%s:%d" % endereco, daemon=True)
+            t.start()
+            with lock_clientes:
+                # Guarda o handle da nova thread e descarta as que ja terminaram
+                clientes[:] = [c for c in clientes if c[1].is_alive()]
+                clientes.append((endereco, t))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        servidor.close()
+        print()
+        log("servidor encerrado.")
 
 
 if __name__ == "__main__":
