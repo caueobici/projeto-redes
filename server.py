@@ -30,7 +30,7 @@ def now():
 
 
 def log(msg):
-    print("[%s] %s\n" % (now(), msg), flush=True)
+    print("[%s] %s" % (now(), msg), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -318,11 +318,16 @@ def main():
     if max_clientes < 1:
         usage()
 
-    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    servidor.bind((host, porta))
-    servidor.listen(5)
-    log("servidor aguardando conexoes em %s:%d (max %d clientes) ..." % (host, porta, max_clientes))
+
+    try:
+        servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        servidor.bind((host, porta))
+        servidor.listen(5)
+        log("servidor aguardando conexoes em %s:%d (max %d clientes) ..." % (host, porta, max_clientes))
+    except:
+        log("erro ao iniciar servidor: %s" % sys.exc_info()[1])
+        sys.exit(1)
 
     try:
         while True:
